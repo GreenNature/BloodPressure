@@ -54,7 +54,7 @@ led_data_t led_data; //BLE 통신 LED 관련정보를 선언한다.
 #define PUMP_MOTOR_PIN		10
 #define VALVE_SOL_PIN		11
 
-#define BLOOD_OFFSET		7
+#define BLOOD_OFFSET		0
 
 /*
  * 2SMPP-02	Span Voltage : 31mV@37kPa
@@ -123,46 +123,19 @@ int detect_peak(
         }
 
         if(is_detecting_emi &&
-                data[i] < mx - delta)
+                data[i] <= mx - delta)
         {
             is_detecting_emi = 0;
-
-            //i = mx_pos - 1;
-            //mn = data[mx_pos];
-            peakDetect = mn;
-            mn_pos = mx_pos;
             return 2;
         }
-        else if( (!is_detecting_emi) && (data[i] > mn + delta) )
+        else if( (!is_detecting_emi) && (data[i] >= mn + delta) )
         {
             is_detecting_emi = 1;
             
-            //i = mn_pos - 1;
             mx = data[mn_pos];
             peakDetect = mx;
             mx_pos = mn_pos;
         }
-#define DBG_NUM	2
-#if DBG_NUM==0
-		Serial.print(data[i]);
-		Serial.println();
-#elif DBG_NUM==1
-        Serial.print("i : ");
-        Serial.print(i);
-		Serial.print(", data : ");
-		Serial.print(data[i]);
-		Serial.print(", mx : ");
-		Serial.print(mx);
-		Serial.print(", mn : ");
-		Serial.print(mn);
-		Serial.print(", mx_pos : ");
-		Serial.print(mx_pos);
-		Serial.print(", mn_pos : ");
-		Serial.print(mn_pos);
-		Serial.print(", is_de : ");
-		Serial.print(is_detecting_emi);
-		Serial.println();
-#endif
     }
     return 0;
 }
@@ -197,7 +170,7 @@ void loop() {
 	char enSensingFlag = 0;
 	int targetPumpingValue = 0;
 	float sysResult = 0, diaResult = 10000;
-	int peakThreshold = 3;
+	int peakThreshold = 5;
 
 	if(digitalRead(PUMP_SWITCH_PIN))
 	{
@@ -226,6 +199,9 @@ void loop() {
 			currNoPeakCount = millis();
 			fValue = getPressure(); //공압값 측정(단위 : mmHg 수은주밀리그램)
 			LPF(&fValue, &lpfResult, 20.0, 0.1, &pastInput, &pastOutput);
+			Serial.print(lpfResult);
+			Serial.print(",");
+			Serial.println(targetPumpingValue);
 			if(lpfResult >= targetPumpingValue && enSensingFlag == 0)
 			{
 				analogWrite(PUMP_MOTOR_PIN, 0); 
@@ -234,14 +210,16 @@ void loop() {
 				delay(100);
 				prevNoPeakCount = currNoPeakCount;
 			}
-			 
+			
 			if( enSensingFlag > 0 )
 			{
+				/*
 				Serial.print(guiSampleDataCount);
 				Serial.print(",");
 				Serial.print(lpfResult);
 				Serial.print(",");
-				Serial.println((currNoPeakCount - prevNoPeakCount));
+				Serial.println(mx-mn);
+				*/
 				
 				if(guiSampleDataCount < MAX_SAMPLE_SIZE)
 				{
@@ -249,7 +227,7 @@ void loop() {
 				}
 				else
 				{
-					char detectResult = detect_peak(sampleData, MAX_SAMPLE_SIZE, 10, mx, mn);
+					char detectResult = detect_peak(sampleData, MAX_SAMPLE_SIZE, 5, mx, mn);
 					if( detectResult == 2 )
 					{
 						//Serial.print("\ndistinction : ");
@@ -258,17 +236,17 @@ void loop() {
 						{
 							if(++peakCount >= 2)
 							{
-								analogWrite(PUMP_MOTOR_PIN, 255);
+								analogWrite(PUMP_MOTOR_PIN, 100 + (targetPumpingValue / 5));
 								targetPumpingValue += 15;
 								enSensingFlag = 0;
 								peakCount = 0;
 
-								if(mn > 200)
-									peakThreshold = 50;
+								if(mn > 160)
+									peakThreshold = 60;
 
 								sysResult = max(sysResult, mn);
 								if(diaResult == 10000)
-									diaResult = mn + (mx - mn);
+									diaResult = mn;
 							}
 							prevNoPeakCount = currNoPeakCount;
 							Serial.println("\n####################################peak!####################################");
@@ -276,7 +254,6 @@ void loop() {
 						guiSampleDataCount = 0;
 					}
 					
-					//guiSampleDataCount = 0;
 					for(int i=0; i<(MAX_SAMPLE_SIZE - 1); i++)
 					{
 						sampleData[i] = sampleData[i + 1];
@@ -294,7 +271,6 @@ void loop() {
 					guiSampleDataCount = 0;
 					if(diaResult != 10000)
 					{
-						calculateBP(&sysResult, &diaResult); //혈압값을 계산한다.
 						printResult(sysResult, diaResult);
 						analogWrite(PUMP_MOTOR_PIN, 0);
 						digitalWrite(VALVE_SOL_PIN, HIGH);
@@ -307,7 +283,6 @@ void loop() {
 			if(targetPumpingValue >= 400)
 			{
 				Serial.print("over pressure");
-				calculateBP(&sysResult, &diaResult); //혈압값을 계산한다.
 				printResult(sysResult, diaResult);
 				analogWrite(PUMP_MOTOR_PIN, 0);
 				digitalWrite(VALVE_SOL_PIN, HIGH);
@@ -346,55 +321,6 @@ float getPressure()
 void bpMeasurementProcess()
 {
 	
-}
-
-void calculateBP(float *sys, float *dia)
-{
-	float MAP = 1/3 * ((*sys) - (*dia)) + (*dia);
-	float ks = 1, kd = 1; //수축혈압의 계수, 이완혈압의 계수를 저장하는 변수를 선언한다.
-	/*
-	 * 실제 혈압과 동일하게 결과값을 계산하기 위하여
-	 * MAP(Mean Arterial Pressure / 평균 동맥앞) 기준으로 수축혈압, 이완혈압의 계수를 설정한다.
-	 * MAP는 아래와 같은 식을 사용하며 SBP는 systolic blood pressure(수축혈압), DBP는 diastolic blood pressure(이완혈압)을 의미한다.
-	 * MAP = 1/3 (SBP – DBP) + DBP
-	 * 
-	 * 아래의 계수는 Microchips社 의 계수 테이블을 사용한다.
-	 */
-	 Serial.print("MAP : ");
-	 Serial.println(MAP);
-    if (MAP>200)                //lower ks to increase SYS, increase ks to lower SYS
-        ks = 0.50;
-    else if (MAP<=200 && MAP>150)
-        ks = 0.29;
-    else if (MAP<=150 && MAP>135)
-        ks = 0.45;
-    else if (MAP<=135 && MAP>120)
-        ks = 0.52;
-    else if (MAP<=120 && MAP>110)
-        ks = 0.58;
-    else if (MAP<=110 && MAP>80)
-        ks = 0.60;
-    else if (MAP<=80 && MAP>70)
-        ks = 0.61;
-    else if (MAP<=70)
-        ks = 0.64;
-
-    //kd is the coefficient for Distolic Pressure
-    if (MAP>180)                //increase kd to increase DIA reading
-        kd = 0.70;
-    else if (MAP<=180 && MAP>140)
-        kd = 0.75;
-    else if (MAP<=140 && MAP>120)
-        kd = 0.82;
-    else if (MAP<=120 && MAP>60)
-        kd = 0.85;
-    else if (MAP<=60 && MAP>50)
-        kd = 0.78;
-    else if (MAP<=50)
-        kd = 0.60;
-
-	*sys = *sys * ks;
-	*dia = *dia * kd;
 }
 
 void printResult(int sysRaw, int diaRaw)
