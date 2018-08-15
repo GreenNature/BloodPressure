@@ -22,10 +22,12 @@ WPacketBase bleTxPacket; //BLE 송신 패킷 객체 생성
 
 #define BLE_SEND_INTERVAL			3000 //BLE 데이터를 전송하는 간격 설정
 
-/*################# 디바이스의 전원 제어 포트 정의 #################*/
-#define POWER_EN_PIN	A4
-#define POWER_KEY_PIN	A5
-/*###############################################################*/
+//디바이스의 전원 제어 포트 정의
+#define POWER_CONTROL  A4 // 전원 제어 핀
+#define POWER_SWITCH_STATE  A5 // 전원 스위치 상태 핀
+
+// 상태 출력 LED 포트 정의
+#define LOWBAT_LED 13 // LOW BAT. LED 핀
 
 /*################# BLE 통신 상태 LED 관련 정의 #################*/
 enum STATUS_LED_CONTOL_TYPE{ //LED의 제어유형을 정의한다.
@@ -54,7 +56,7 @@ led_data_t led_data; //BLE 통신 LED 관련정보를 선언한다.
 #define PUMP_MOTOR_PIN		10
 #define VALVE_SOL_PIN		11
 
-#define BLOOD_OFFSET		0
+#define PRESSURE_OFFSET		0		//
 
 /*
  * 2SMPP-02	Span Voltage : 31mV@37kPa
@@ -78,6 +80,16 @@ void enableLed();
 void ledProcess();
 void sendBleData();
 
+/**
+ * Low Pass Filter의 줄임말로, 고주파(잡음이 심한 파형)에서
+ * 저주파(잡음이 적은 파형)를 필터링하여 추출한다.
+ * @param Input             입력 값
+ * @param Output            출력 값
+ * @param SamplingFrequency 샘플링 주파수
+ * @param CutOffFrequency   차단할 주파수
+ * @param PastInput         이전 입력 값
+ * @param PastOutput        이전 출력 값
+ */
 void LPF(float *Input, float *Output, float SamplingFrequency, float CutOffFrequency, float *PastInput, float *PastOutput)
 {
 	float a1,b0,b1,w0;
@@ -96,8 +108,8 @@ int detect_peak(
         const int*   data, /* the data */ 
         int          data_count, /* row count of data */ 
         int          delta, /* delta used for distinguishing peaks */
-        int& mx,
-        int& mn
+        int& mx, //
+        int& mn //
         )
 {
     int     i;
@@ -123,7 +135,7 @@ int detect_peak(
         }
 
         if(is_detecting_emi &&
-                data[i] <= mx - delta)
+                data[i] <= (mx - delta + 2))
         {
             is_detecting_emi = 0;
             return 2;
@@ -143,12 +155,13 @@ int detect_peak(
 void setup() {
 	DEBUG_SERIAL.begin(115200);
 	BLE_SERIAL.begin(115200);
-	pinMode(POWER_EN_PIN, OUTPUT);
+	pinMode(POWER_SWITCH_STATE, INPUT); 
 	
-	pinMode(POWER_KEY_PIN, INPUT);
-	pinMode(LED_BUILTIN, OUTPUT);
+	pinMode(POWER_CONTROL, OUTPUT); 
+	pinMode(LOWBAT_LED, OUTPUT);
+	
+	digitalWrite(POWER_CONTROL, HIGH);
 	pinMode(BT_LED_PIN, OUTPUT);
-	digitalWrite(POWER_EN_PIN, HIGH);
 	
 	pinMode(PUMP_SWITCH_PIN, INPUT);
 	pinMode(VALVE_SWITCH_PIN, INPUT);
@@ -159,19 +172,7 @@ void setup() {
 
 void loop() {
 	static unsigned long int prevBleSendMillis = millis();
-	static float pastInput = 0, pastOutput = 0;
 	static char workingFlag = 0;
-	float lpfResult = 0;
-	unsigned long int prevPumpingMillis = 0;
-	int rawData;
-	float fValue;
-	int mx, mn;
-	char peakCount = 0;
-	long prevNoPeakCount = 0, currNoPeakCount = 0;
-	char enSensingFlag = 0;
-	int targetPumpingValue = 0;
-	float sysResult = 0, diaResult = 10000;
-	int peakThreshold = 5;
 
 	if(digitalRead(PUMP_SWITCH_PIN))
 	{
@@ -181,111 +182,7 @@ void loop() {
 
 	if(workingFlag & (0x01 << 0))
 	{
-		digitalWrite(VALVE_SOL_PIN, LOW);
-		digitalWrite(PUMP_MOTOR_PIN, HIGH);
-		guiSampleDataCount = 0;
-		targetPumpingValue = 100;
-		do //팔에 맞게 커프에 공압을 넣어준다.
-		{
-			fValue = getPressure(); //공압값 측정(단위 : mmHg 수은주밀리그램)
-			LPF(&fValue, &lpfResult, 20.0, 0.1, &pastInput, &pastOutput);
-		}while(lpfResult < targetPumpingValue);
-		digitalWrite(PUMP_MOTOR_PIN, LOW);
-
-		delay(500);
-		analogWrite(PUMP_MOTOR_PIN, 255);
-		
-		while(1)
-		{
-			currNoPeakCount = millis();
-			fValue = getPressure(); //공압값 측정(단위 : mmHg 수은주밀리그램)
-			LPF(&fValue, &lpfResult, 20.0, 0.1, &pastInput, &pastOutput);
-			
-			if( (millis() - prevPumpingMillis > 300) && enSensingFlag == 0)
-			{
-				analogWrite(PUMP_MOTOR_PIN, 0); 
-				enSensingFlag = 1;
-				guiSampleDataCount = 0;
-				delay(100);
-				prevNoPeakCount = currNoPeakCount;
-			}
-			
-			if( enSensingFlag > 0 )
-			{
-				Serial.print(guiSampleDataCount);
-				Serial.print(",");
-				Serial.print(lpfResult);
-				Serial.print(",");
-				Serial.println(mx-mn);
-				
-				if(guiSampleDataCount < MAX_SAMPLE_SIZE)
-				{
-					sampleData[ guiSampleDataCount++ ] = lpfResult;
-				}
-				else
-				{
-					char detectResult = detect_peak(sampleData, MAX_SAMPLE_SIZE, 5, mx, mn);
-					if( detectResult == 2 )
-					{
-						//Serial.print("\ndistinction : ");
-						//Serial.println(mx - mn);
-						if(mx - mn > peakThreshold)
-						{
-							if(++peakCount >= 2)
-							{
-								analogWrite(PUMP_MOTOR_PIN, 255);
-								prevPumpingMillis = millis();
-								enSensingFlag = 0;
-								peakCount = 0;
-
-								if(mx > 130)
-									peakThreshold = 60;
-
-								sysResult = max(sysResult, mn);
-								if(diaResult == 10000)
-									diaResult = mn;
-							}
-							prevNoPeakCount = currNoPeakCount;
-							Serial.println("\n####################################peak!####################################");
-						}
-						guiSampleDataCount = 0;
-					}
-					
-					for(int i=0; i<(MAX_SAMPLE_SIZE - 1); i++)
-					{
-						sampleData[i] = sampleData[i + 1];
-					}
-					sampleData[(MAX_SAMPLE_SIZE - 1)] = lpfResult;
-				}
-				//만약 맥박이 2.3초 이상 측정이 안되었을 시 공압을 늘린다.
-				if((currNoPeakCount - prevNoPeakCount) > 2300)
-				{
-					analogWrite(PUMP_MOTOR_PIN, 255); //모터를 동작시킨다.
-					prevPumpingMillis = millis();
-					enSensingFlag = 0;
-					peakCount = 0;
-					guiSampleDataCount = 0;
-					if(diaResult != 10000)
-					{
-						printResult(sysResult, diaResult);
-						analogWrite(PUMP_MOTOR_PIN, 0);
-						digitalWrite(VALVE_SOL_PIN, HIGH);
-						break;
-					}
-					prevNoPeakCount = currNoPeakCount;
-				}
-			}
-			// 만약 압력이 과도하게 들어갔을 경우
-			if(targetPumpingValue >= 400)
-			{
-				Serial.print("over pressure");
-				printResult(sysResult, diaResult);
-				analogWrite(PUMP_MOTOR_PIN, 0);
-				digitalWrite(VALVE_SOL_PIN, HIGH);
-				break;
-			}
-			delay(5);
-		}
+		bpMeasurementProcess();
 		workingFlag = 0;
 	}
 
@@ -310,13 +207,137 @@ float getPressure()
 {
 	float result;
 	result = (float)analogRead(DATA_INPUT_PIN);
-	result = result * GAIN_BP + BLOOD_OFFSET;
+	//ADC로 측정된 공압 데이터를 수은주밀리그램으로 환상한다.
+	//결과값 = ADC 값 * 수은주밀리그램 변환 계수 * 공압 오차
+	result = result * GAIN_BP + PRESSURE_OFFSET;
 	return result;
 }
 
 void bpMeasurementProcess()
 {
+	static float pastInput = 0, pastOutput = 0;
+	float lpfResult = 0;
+	unsigned long int prevPumpingMillis = 0;
+	int rawData;
+	float fValue;
+	int mx, mn;
+	char peakCount = 0;
+	long prevNoPeakMillis = 0, currNoPeakCount = 0;
+	char enSensingFlag = 0;
+	int targetPumpingValue;
+	float sysResult = 0, diaResult = -1;
+	int peakThreshold = 5;
 	
+	digitalWrite(VALVE_SOL_PIN, LOW);
+	analogWrite(PUMP_MOTOR_PIN, 255);
+	guiSampleDataCount = 0;
+	pastInput = 0;
+	pastOutput = 0;
+	targetPumpingValue = 100;
+	do //커프가 팔에 딱 붙여서 감쌀 수 있게 커프에 공압을 넣어준다.
+	{
+		fValue = getPressure(); //공압값 측정(단위 : mmHg 수은주밀리그램)
+		LPF(&fValue, &lpfResult, 20.0, 0.1, &pastInput, &pastOutput); //Low Pass Filter로 노이즈를 최소화한다.
+		delay(5);
+	}while(lpfResult < targetPumpingValue); //현재압력이 목표압력과 같아지도록 공압을 계속 넣는다.
+	analogWrite(PUMP_MOTOR_PIN, 0); //현재압력과 목표압력이 같아졌으면 Pump 모터를 정지한다.
+	delay(500);
+	
+	while(1)
+	{
+		fValue = getPressure(); //공압값 측정(단위 : mmHg 수은주밀리그램)
+		LPF(&fValue, &lpfResult, 20.0, 0.1, &pastInput, &pastOutput); //Low Pass Filter로 노이즈를 최소화한다.
+
+		//공압을 넣는 시간이 300ms 이상이고, 맥박을 측정하는 프로세스를 허용하는 플래그가 0일 때
+		if( (millis() - prevPumpingMillis > 300) && enSensingFlag == 0)
+		{
+			analogWrite(PUMP_MOTOR_PIN, 0); //Pump 모터를 정지한다.
+			enSensingFlag = 1; //공압 센서를 읽는 프로세스를 시작할 수 있게 한다.
+			guiSampleDataCount = 0; //Sample 데이터를 수집하는 카운트를 0으로 초기화한다.
+			delay(100); //Pump 모터 정지 후 공압 안정을 위하여 100ms를 대기한다.
+			prevNoPeakMillis = millis(); //맥박을 감지못한 시간을 측정하기 위하여 시간값을 초기화한다.
+		}
+		
+		if( enSensingFlag > 0 ) //맥박을 측정하는 프로세스가 허용되어있을 때
+		{
+			Serial.print(lpfResult);
+			Serial.println();
+
+			//Sample 데이터를 먼저 MAX_SAMPLE_SIZE만큼 모아두고, 맥박을 감지하기 때문에
+			//먼저 MAX_SAMPLE_SIZE만큼 데이터를 수집한다.
+			if(guiSampleDataCount < MAX_SAMPLE_SIZE)
+			{
+				sampleData[ guiSampleDataCount++ ] = lpfResult; //Sample 데이터를 수집한다.
+			}
+			//만약 Sample 데이터가 전부 모였으면 맥박을 감지한다.
+			else
+			{
+				//detect_peak 함수를 이용하여 맥박이 감지되었는지 확인하고, 결과값을 detectResult 변수에 저장한다.
+				char detectResult = detect_peak(sampleData, MAX_SAMPLE_SIZE, peakThreshold, mx, mn);
+				
+				if( detectResult == 2 ) //만약 맥박이 감지되었으면
+				{
+					//
+					//peakCount 변수의 값을 먼저 1증가 시키고, 만약 맥박이 두번 연속 감지되었으면 
+					//해당 압력에 맥박이 확실하게 감지되고 있는것으로 판별한다.
+					if(++peakCount >= 2)
+					{
+						if(mx > 130) //만약 맥박의 수치가 130이면, 맥박의 확인 감도를 60으로 올린다.
+							peakThreshold = 40;
+
+						sysResult = max(sysResult, mn); //수축혈압을 현재 측정중인 최대값으로 갱신한다.
+						//현재 맥박이 처음 감지되어 이완혈압이 설정 안되어있다면, 현재 공압을 이완혈압으로 저장한다.
+						if(diaResult == -1)
+						{
+							diaResult = mx; //
+						}
+						
+						enSensingFlag = 0; //맥박 감지 프로세스를 비허용한다.
+						peakCount = 0; //맥박 감지 횟수 카운트를 초기화한다.
+						analogWrite(PUMP_MOTOR_PIN, 255); //Pump 모터를 동작시켜 공압을 증가시킨다.
+						prevPumpingMillis = millis(); //Pump 모터동작 시간을 초기화한다.
+					}
+					prevNoPeakMillis = millis();
+					Serial.println("\n####################################peak!####################################");
+					
+					guiSampleDataCount = 0; //Sample 데이터 카운트를 초기화한다. 
+				}
+				
+				for(int i=0; i<(MAX_SAMPLE_SIZE - 1); i++)
+				{
+					sampleData[i] = sampleData[i + 1]; //데이터를 한칸씩 이동하여 오래된 데이터를 지운다.
+				}
+				sampleData[(MAX_SAMPLE_SIZE - 1)] = lpfResult; //새로운 데이터를 추가한다.
+			}
+			//만약 맥박이 2.3초 이상 측정이 안되었을 시 공압을 늘린다.
+			if((millis() - prevNoPeakMillis) > 2300)
+			{
+				analogWrite(PUMP_MOTOR_PIN, 255); //모터를 동작시킨다.
+				prevPumpingMillis = millis();
+				enSensingFlag = 0; //맥박 감지 프로세스를 비허용한다.
+				peakCount = 0; //맥박 감지 횟수 카운트를 초기화한다.
+				guiSampleDataCount = 0; //Sample 데이터 카운트를 초기화한다.
+				if(diaResult != -1) //만약 이완혈압이 측정되었을 시
+				{
+					printResult(sysResult, diaResult); //수축혈압, 이완혈압을 출력한다.
+					analogWrite(PUMP_MOTOR_PIN, 0); //모터를 정지한다.
+					digitalWrite(VALVE_SOL_PIN, HIGH); //밸브를 열어 커프내의 공압을 뺀다.
+					break; //혈압 측정 while문을 빠져나간다.
+				}
+				prevNoPeakMillis = millis();
+			}
+		}
+		// 만약 압력이 과도하게 들어갔을 경우
+		if(targetPumpingValue >= 400)
+		{
+			Serial.print("over pressure");
+			printResult(sysResult, diaResult);
+			analogWrite(PUMP_MOTOR_PIN, 0); //모터를 정지한다.
+			digitalWrite(VALVE_SOL_PIN, HIGH);  //밸브를 열어 커프내의 공압을 뺀다.
+			break; //혈압 측정 while문을 빠져나간다.
+		}
+		delay(5);
+	}
 }
 
 void printResult(int sysRaw, int diaRaw)
@@ -331,35 +352,39 @@ void printResult(int sysRaw, int diaRaw)
 	giDiaData = diaRaw;
 }
 
+/**
+ * 전원 스위치에 대한 기능을 정의한 함수
+ */
 void powerLedProcess()
 {
-	static unsigned long int buttonCurr = 0, buttonPrev = 0;
-	static char ledFlag = 0;
+  static unsigned long int currTime = 0, prevTime = 0; 
+  static char ledControlFlag = 0; // LED 제어를 위한 플래그 변수
 
-	buttonCurr = millis();
-	int powerAnlogValue = analogRead(POWER_KEY_PIN);
-	if(powerAnlogValue>20)
-	{
-		if( (buttonCurr - buttonPrev) > 1000)
-		{
-			static char ledFlag = 0;
-			digitalWrite(LED_BUILTIN, ledFlag^=1);
-			digitalWrite(POWER_EN_PIN, LOW);
-			delay(80);
-		}
-		else
-		{
-			digitalWrite(LED_BUILTIN, LOW);
-		}
-	}
-	else
-	{
-		digitalWrite(LED_BUILTIN, HIGH);
-		buttonPrev = buttonCurr;
-		digitalWrite(POWER_EN_PIN, HIGH);
-	}
+  currTime = millis();
+  int powerSwitchValue = analogRead(POWER_SWITCH_STATE); 
+  if(powerSwitchValue>20)
+  {
+    if( (currTime - prevTime) > 1000)
+    {
+      ledControlFlag = !ledControlFlag;
+     
+      digitalWrite(LOWBAT_LED, ledControlFlag); 
+      digitalWrite(POWER_CONTROL, LOW);
+      delay(80);
+    }
+    else
+    {
+      digitalWrite(LOWBAT_LED, LOW);
+    }
+  }
+ 
+  else
+  {
+    digitalWrite(LOWBAT_LED, HIGH);
+    prevTime = currTime;
+    digitalWrite(POWER_CONTROL, HIGH);
+  }
 }
-
 
 /**
  * @brief
