@@ -162,6 +162,7 @@ void loop() {
 	static float pastInput = 0, pastOutput = 0;
 	static char workingFlag = 0;
 	float lpfResult = 0;
+	unsigned long int prevPumpingMillis = 0;
 	int rawData;
 	float fValue;
 	int mx, mn;
@@ -199,10 +200,8 @@ void loop() {
 			currNoPeakCount = millis();
 			fValue = getPressure(); //공압값 측정(단위 : mmHg 수은주밀리그램)
 			LPF(&fValue, &lpfResult, 20.0, 0.1, &pastInput, &pastOutput);
-			Serial.print(lpfResult);
-			Serial.print(",");
-			Serial.println(targetPumpingValue);
-			if(lpfResult >= targetPumpingValue && enSensingFlag == 0)
+			
+			if( (millis() - prevPumpingMillis > 300) && enSensingFlag == 0)
 			{
 				analogWrite(PUMP_MOTOR_PIN, 0); 
 				enSensingFlag = 1;
@@ -213,13 +212,11 @@ void loop() {
 			
 			if( enSensingFlag > 0 )
 			{
-				/*
 				Serial.print(guiSampleDataCount);
 				Serial.print(",");
 				Serial.print(lpfResult);
 				Serial.print(",");
 				Serial.println(mx-mn);
-				*/
 				
 				if(guiSampleDataCount < MAX_SAMPLE_SIZE)
 				{
@@ -236,12 +233,12 @@ void loop() {
 						{
 							if(++peakCount >= 2)
 							{
-								analogWrite(PUMP_MOTOR_PIN, 100 + (targetPumpingValue / 5));
-								targetPumpingValue += 15;
+								analogWrite(PUMP_MOTOR_PIN, 255);
+								prevPumpingMillis = millis();
 								enSensingFlag = 0;
 								peakCount = 0;
 
-								if(mn > 160)
+								if(mx > 130)
 									peakThreshold = 60;
 
 								sysResult = max(sysResult, mn);
@@ -264,8 +261,7 @@ void loop() {
 				if((currNoPeakCount - prevNoPeakCount) > 2300)
 				{
 					analogWrite(PUMP_MOTOR_PIN, 255); //모터를 동작시킨다.
-					//모터 동작 시 측정되는 공압은 혈압 측정될 때 보다 범위가 크므로 10을 더해준다.
-					targetPumpingValue += 10;
+					prevPumpingMillis = millis();
 					enSensingFlag = 0;
 					peakCount = 0;
 					guiSampleDataCount = 0;
