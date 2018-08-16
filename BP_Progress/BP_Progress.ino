@@ -178,7 +178,6 @@ void bpMeasurementProcess()
 	int targetPumpingValue; //목표 공압을 저장하는 변수 
 	float sysResult = 0, diaResult = -1; //수축혈압, 이완혈압을 저장하는 변수
 	int peakThreshold = 7; //공압 파형에서 맥박이 뛰었을 때의 파형이 올라가는 변화량 기준을 저장하는 변수
-	float averagePressure = 0; // 맨 처음 공압의 평균 값을 구하기 위한 변수
 
 	/*
 	 * 공압의 오차값을 보정하기 위하여 공압을 넣지 않은 상태의 값을 60에서 뺀다.
